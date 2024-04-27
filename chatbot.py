@@ -1,64 +1,125 @@
 import json
 import numpy as np
-from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
-from sklearn.model_selection import train_test_split
-from tensorflow.keras.models import Sequential, model_from_json
-from tensorflow.keras.layers import LSTM, Dense, Embedding, Dropout
-import matplotlib.pyplot as plt
+from tensorflow.keras.preprocessing.text import Tokenizer
+from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.preprocessing.text import tokenizer_from_json
+import random
+import os
+import time
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Load JSON data
-with open('intents.json', 'r', encoding='utf-8') as file:
-    data = json.load(file)
 
-# Prepare lists for training data
-instructions = [item['INSTRUCTION'] for item in data]
-responses = [item['RESPONSE'] for item in data]
+def load_model_and_components(model_path, tokenizer_path, label_encoder_path):
+    # Load the trained model
+    model = load_model(model_path)
 
-# Tokenization
-tokenizer = Tokenizer()
-tokenizer.fit_on_texts(instructions + responses)
-vocab_size = len(tokenizer.word_index) + 1
+    # Load the tokenizer
+    with open(tokenizer_path) as file:
+        tokenizer_data = json.load(file)
+        tokenizer = tokenizer_from_json(tokenizer_data)  # Pass the dictionary directly
+    
+    # Load the label encoder
+    with open(label_encoder_path) as file:
+        classes = json.load(file)
+        label_encoder = LabelEncoder()
+        label_encoder.classes_ = np.array(classes)
 
-# Convert text to sequences of integers
-seq_instructions = tokenizer.texts_to_sequences(instructions)
-seq_responses = tokenizer.texts_to_sequences(responses)
+    return model, tokenizer, label_encoder
 
-# Pad sequences for uniform input size
-max_seq_length = max(max(len(seq) for seq in seq_instructions), max(len(seq) for seq in seq_responses))
-seq_instructions = pad_sequences(seq_instructions, maxlen=max_seq_length, padding='post')
-seq_responses = pad_sequences(seq_responses, maxlen=max_seq_length, padding='post')
+def preprocess_text(text):
+    lemmatizer = WordNetLemmatizer()
+    tokens = word_tokenize(text.lower())  # Tokenize and convert to lowercase
+    tokens = [lemmatizer.lemmatize(token) for token in tokens]  # Lemmatize tokens
+    return " ".join(tokens)
 
-# Split data into training and testing
-X_train, X_test, y_train, y_test = train_test_split(seq_instructions, seq_responses, test_size=0.2, random_state=42)
+def predict_intent(text, model, tokenizer, label_encoder, max_len=20):
+    preprocessed_text = preprocess_text(text)
+    # Tokenize and pad the preprocessed text
+    sequence = tokenizer.texts_to_sequences([preprocessed_text])
+    padded_sequence = pad_sequences(sequence, maxlen=max_len)
+    
+    # Predict the category
+    prediction = model.predict(padded_sequence)
+    intent_index = np.argmax(prediction)
+    intent = label_encoder.inverse_transform([intent_index])[0]
+    return intent
 
-# Define the model with adjusted parameters
-model = Sequential()
-model.add(Embedding(vocab_size, 200))  # Increased embedding dimension to 200
-model.add(LSTM(256, return_sequences=True))  # Increased LSTM units to 256
-model.add(Dropout(0.4))  # Increased dropout rate to 0.4
-model.add(LSTM(256, return_sequences=True))
-model.add(Dense(vocab_size, activation='softmax'))
+def responses(intent, user_input, corpus_file):
+    print("Extracted Intent:", intent)  # Debug print
+    print("User Input:", user_input)  # Debug print
+    
+    if intent in corpus_file:
+        responses_list = corpus_file[intent]
+        if len(responses_list) > 1:
+            # Calculate TF-IDF vectors for user input and intent responses
+            tfidf_vectorizer = TfidfVectorizer()
+            all_responses = [user_input] + responses_list
+            tfidf_matrix = tfidf_vectorizer.fit_transform(all_responses)
 
-model.compile(loss='sparse_categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+            # Calculate cosine similarity between user input and responses
+            similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
+            # Sort responses based on similarity (higher is better)
+            sorted_indices = np.argsort(similarities)[::-1]
 
-# Fit the updated model with reshaped target tensors
-history = model.fit(X_train, y_train, validation_data=(X_test, y_test), epochs=15, batch_size=64) 
+            # Choose the most similar response
+            most_similar_response = responses_list[sorted_indices[0]]
+            return most_similar_response
+        else:
+            return responses_list[0]
+    else:
+        return "Sorry, I don't have information on that topic."
 
-# Save the model architecture to JSON
-model_json = model.to_json()
-with open("model_architecture.json", "w") as json_file:
-    json_file.write(model_json)
 
-# Save the trained model weights
-model.save_weights("model_weights.h5")
+def main():
+    model_path = 'intent_model.h5'
+    tokenizer_path = 'tokenizer.json'
+    label_encoder_path = 'label_encoder.json'
+    intents_json_path = 'intents.json'
 
-# Plotting the updated learning curve
-plt.figure(figsize=(12, 6))
-plt.plot(history.history['accuracy'], label='Training Accuracy')
-plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
-plt.title('Model accuracy during training')
-plt.ylabel('Accuracy')
-plt.xlabel('Epoch')
-plt.legend(loc='upper left')
-plt.show()
+    # Load model and components
+    model, tokenizer, label_encoder = load_model_and_components(model_path, tokenizer_path, label_encoder_path)
+
+    # Load intents data
+    with open(intents_json_path) as file:
+        intents_data = json.load(file)
+
+    # Convert intents data to a dictionary for easy access
+    corpus_file = {}
+    for entry in intents_data:
+        corpus_file[entry['INSTRUCTION']] = entry['RESPONSE']
+
+    print("WeekndBot: Hello! I am WeekndBot. Please enter your name for the best experience, or enter 'bye' to exit.")
+    user_input = input("You: ")
+
+    if user_input.lower() == 'bye':
+        print("WeekndBot: Goodbye!")
+        return
+
+    userName = user_input.lower() + '.txt'
+    if os.path.exists(userName):
+        print(f"Welcome back, {user_input}!")
+    else:
+        with open(userName, 'w') as f:
+            f.write(f"User: {user_input}\n")
+
+    print("WeekndBot: What would you like to know about The Weeknd? Enter 'bye' to exit.")
+
+    while True:
+        user_input = input("You: ")
+
+        if user_input.lower() == 'bye':
+            print("WeekndBot: Goodbye!")
+            break
+
+        intent = predict_intent(user_input, model, tokenizer, label_encoder)
+        bot_response = responses(intent, user_input, corpus_file)
+        print("WeekndBot:", bot_response)
+
+if __name__ == "__main__":
+    main()

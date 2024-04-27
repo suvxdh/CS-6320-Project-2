@@ -1,71 +1,78 @@
 import json
 import numpy as np
-import random
-import matplotlib.pyplot as plt
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Embedding, LSTM, TimeDistributed
+from tensorflow.keras.layers import Dense, Embedding, GlobalAveragePooling1D, Dropout
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.layers import GRU
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
 
-# Load intents from JSON file
-with open('intents.json', 'r') as f:
-    intents = json.load(f)
+# Function to load and clean text data
+def load_and_clean_data(filename):
+    with open(filename) as file:
+        data = json.load(file)
+    instructions = [item['Context'] for item in data]
+    responses = [item['Response'] for item in data]
+    
+    # Clean the instructions
+    instructions = [clean_text(text) for text in instructions]
+    return instructions, responses
 
-# Extract patterns and responses from intents
-patterns = []
-responses = []
-for intent in intents['intents']:
-    for pattern in intent['patterns']:
-        patterns.append(pattern)
-        responses.append(random.choice(intent['responses']))
+def clean_text(text):
+    text = re.sub(r'[^a-zA-Z]', ' ', text)  # Remove non-letters
+    words = text.lower().split()  # Convert to lower case, split into words
+    stops = set(stopwords.words("english"))  # Load the list of stopwords
+    meaningful_words = [w for w in words if not w in stops]  # Remove stopwords
+    lemmatizer = WordNetLemmatizer()  # Lemmatize words
+    lemmatized_words = [lemmatizer.lemmatize(w) for w in meaningful_words]
+    return " ".join(lemmatized_words)
 
-# Tokenization
-tokenizer = Tokenizer()
-tokenizer.fit_on_texts(patterns)
-vocab_size = len(tokenizer.word_index) + 1
+# Function to prepare the text data
+def prepare_text_data(texts, num_words, max_len):
+    tokenizer = Tokenizer(num_words=num_words)
+    tokenizer.fit_on_texts(texts)
+    sequences = tokenizer.texts_to_sequences(texts)
+    padded_sequences = pad_sequences(sequences, maxlen=max_len)
+    return tokenizer, padded_sequences
 
-# Convert text to sequences
-sequences = tokenizer.texts_to_sequences(patterns)
-max_sequence_len = max([len(seq) for seq in sequences])
-padded_sequences = pad_sequences(sequences, maxlen=max_sequence_len, padding='post')
-print("is the max sequence length size: ", max_sequence_len)
-# Convert responses to sequences
-response_sequences = tokenizer.texts_to_sequences(responses)
-padded_response_sequences = pad_sequences(response_sequences, maxlen=max_sequence_len, padding='post')
+def build_model(input_dim, output_dim):
+    model = Sequential([
+        Embedding(input_dim, 50),
+        GRU(256),  
+        Dense(256, activation='relu'),
+        Dropout(0.3),  
+        Dense(output_dim, activation='softmax')
+    ])
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    return model
 
-# Convert sequences to one-hot encoding
-responses_array = np.zeros((len(padded_response_sequences), max_sequence_len, vocab_size), dtype=np.int8)
-for i, seq in enumerate(padded_response_sequences):
-    for j, token_index in enumerate(seq):
-        responses_array[i, j, token_index] = 1
 
-# Model architecture with TimeDistributed layer
-model = Sequential([
-    Embedding(vocab_size, 128),
-    LSTM(128, return_sequences=True),
-    TimeDistributed(Dense(vocab_size, activation='softmax'))  # Apply Dense layer to each time step
-])
+# Main execution flow
+if __name__ == "__main__":
+    instructions, responses = load_and_clean_data('combined_dataset.json')
+    num_words = 10000
+    max_len = 20
 
-model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    # Prepare the data
+    tokenizer, padded_instructions = prepare_text_data(instructions, num_words, max_len)
+    label_encoder = LabelEncoder()
+    labels = label_encoder.fit_transform(responses)
+    categorical_labels = to_categorical(labels)
 
-# Training with history to plot learning curve
-history = model.fit(padded_sequences, responses_array, epochs=450, validation_split=0.2)
+    # Build and train the model
+    model = build_model(num_words + 1, len(set(labels)))
+    model.fit(padded_instructions, categorical_labels, epochs=125, batch_size=256)
 
-# Save the model
-model.save('chatbot_model.h5')
+    # Save the model and tokenizer
+    model.save('intent_model.h5')
+    with open('tokenizer.json', 'w') as f:
+        json.dump(tokenizer.to_json(), f)
+    with open('label_encoder.json', 'w') as f:
+        json.dump(label_encoder.classes_.tolist(), f)
 
-# Plotting the learning curve
-plt.figure(figsize=(12, 6))
-plt.plot(history.history['accuracy'], label='Training Accuracy')
-plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
-plt.title('Model accuracy during training')
-plt.ylabel('Accuracy')
-plt.xlabel('Epoch')
-plt.legend(loc='upper left')
-plt.show()
-
-# Printing the final training and validation accuracy
-final_train_accuracy = history.history['accuracy'][-1]
-final_val_accuracy = history.history['val_accuracy'][-1]
-print("Final Training Accuracy: {:.2f}%".format(final_train_accuracy * 100))
-print("Final Validation Accuracy: {:.2f}%".format(final_val_accuracy * 100))
+    print("Model and tokenizer saved successfully.")
